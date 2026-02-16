@@ -30,7 +30,9 @@ def convert_bands_to_greyscale(
         grey_float = 0.2126 * red + 0.7152 * green + 0.0722 * blue
     elif method == "lig":
         grey_float = (np.maximum.reduce([red, blue, green]) \
-                      + np.minimum.reduce([red, blue, green])) / 2    
+                      + np.minimum.reduce([red, blue, green])) / 2
+    else:
+        raise ValueError(f"Unknown greyscale method: {method}")
 
     # Convert the resulting array of floats (H, W) into 8-bit.
     grey_int = np.uint8(grey_float)
@@ -40,36 +42,46 @@ def convert_bands_to_greyscale(
 
     return grey
 
-def RGB_to_greyscale(img: Image.Image) -> Image.Image:
+def RGB_to_greyscale(img: Image.Image, method: str = "nor") -> Image.Image:
     """Convert RGB image to a greyscale image.
-    
+
     Args:
         img: Input RGB image.
-        
+        method: RGB to greyscale conversion method, with the following options:
+            - "nor": perceptual weighting based on human visual sensitivity
+            - "avg": arithmetic mean of RGB channels
+            - "lum": luminance-based conversion
+            - "lig": lightness conversion using HSL definition
+
     Returns:
         Greyscale version of the input image.
     """
     red, green, blue = get_bands(img)
 
-    grey = convert_bands_to_greyscale(red, green, blue, "nor")
+    grey = convert_bands_to_greyscale(red, green, blue, method)
 
     greyscale_img = Image.fromarray(grey)
 
     return greyscale_img
 
-def generate_mixed_img(img: Image.Image, colorpoints_coords: np.ndarray) -> Image.Image:
+def generate_mixed_img(
+    img: Image.Image,
+    colorpoints_coords: np.ndarray,
+    greyscale_method: str = "nor",
+) -> Image.Image:
     """Create a mixed color and greyscale image, with the position of colorpoints predetermined.  
     
     Args:
         img: The input RGB image.
         colorpoints_coords: A boolean array, where True indicates pixels to be left in RGB.
+        greyscale_method: RGB to greyscale conversion method.
         
     Returns:
         A mixed color and greyscale image.
         
     """
     color_img = img
-    greyscale_img = RGB_to_greyscale(img)
+    greyscale_img = RGB_to_greyscale(img, greyscale_method)
 
     color_img_array = np.asarray(color_img).copy()
     greyscale_img_array = np.asarray(greyscale_img).copy()

@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import numpy as np
 from PIL import Image, ImageTk
 
 from generalfunctions import get_D, random_bool_array, uniform_bool_array
@@ -47,6 +48,9 @@ DEFAULT_WINDOW_WIDTH = 1400
 DEFAULT_WINDOW_HEIGHT = 800
 GEOMETRY_ENFORCE_DELAY_MS = 120
 DEFAULT_GREYSCALE_METHOD = "Luminosity"
+DEFAULT_MANUAL_BRUSH_SIZE = 1.0
+MIN_MANUAL_BRUSH_SIZE = 0.1
+MAX_MANUAL_BRUSH_SIZE = 10.0
 
 try:
     RESAMPLE_FILTER = Image.Resampling.LANCZOS
@@ -71,7 +75,16 @@ class RecolorizerApp(tk.Tk):
         self.image_mixed: Image.Image | None = None
         self.image_recolorised: Image.Image | None = None
         self.colorpoints_coords = None
+        self.colorpoint_mode_used = None
         self.greyscale_method_used = None
+        self.manual_colorpoints_coords = None
+        self.manual_color_array = None
+        self.manual_greyscale_array = None
+        self.manual_mixed_array = None
+        self.manual_method_used = None
+        self.manual_drag_active = False
+        self.manual_last_point = None
+        self.manual_sparse_counter = 0
         self.panel_aspect_ratio = CELL_WIDTH / CELL_HEIGHT
         self.frame_margin_x = IMAGE_FRAME_PAD_X
         self.frame_margin_y = IMAGE_FRAME_PAD_Y
@@ -136,6 +149,9 @@ class RecolorizerApp(tk.Tk):
         self.image_grid.bind("<Configure>", self._on_image_grid_resize)
         for key, panel in self.panels.items():
             panel.bind("<Configure>", lambda _event, name=key: self._on_panel_resize(name))
+        self.source_canvas.bind("<ButtonPress-1>", self._on_source_mouse_down)
+        self.source_canvas.bind("<B1-Motion>", self._on_source_mouse_drag)
+        self.source_canvas.bind("<ButtonRelease-1>", self._on_source_mouse_up)
         self.after_idle(self._update_panel_sizes)
 
         button_column = tk.Frame(
@@ -150,8 +166,16 @@ class RecolorizerApp(tk.Tk):
         self._build_greyscale_controls(button_column)
         self._create_button(button_column, "Generate Greyscale", self.create_greyscale_image)
         self._build_colorpoint_controls(button_column)
-        self._create_button(button_column, "Generate Mixed Image", self.create_mixed_image)
-        self._create_button(button_column, "Generate Recolorised", self.create_recolorised_image)
+        self.mixed_button = self._create_button(
+            button_column,
+            "Generate Mixed Image",
+            self.create_mixed_image,
+        )
+        self.recolorised_button = self._create_button(
+            button_column,
+            "Generate Recolorised",
+            self.create_recolorised_image,
+        )
 
         self.status_var = tk.StringVar(value="Load an image to begin.")
         status_label = tk.Label(
@@ -170,6 +194,7 @@ class RecolorizerApp(tk.Tk):
             self.clear_images,
             side="bottom",
         )
+        self._set_mixed_button_visibility()
 
     def _create_image_panel(self, parent: tk.Widget, row: int, col: int) -> tk.Canvas:
         """Create one fixed-size subimage panel in the 2x2 display grid.
@@ -194,7 +219,7 @@ class RecolorizerApp(tk.Tk):
         panel.grid(row=row, column=col, padx=GRID_GAP_X, pady=GRID_GAP_Y)
         return panel
 
-    def _create_button(self, parent: tk.Widget, text: str, command, side: str = "top") -> None:
+    def _create_button(self, parent: tk.Widget, text: str, command, side: str = "top") -> tk.Button:
         """Create one control button in the right-hand column.
 
         Args:
@@ -204,7 +229,7 @@ class RecolorizerApp(tk.Tk):
             side: Pack side for placing the button.
 
         Returns:
-            None.
+            The created button widget.
         """
         button = tk.Button(
             parent,
@@ -223,6 +248,7 @@ class RecolorizerApp(tk.Tk):
             button.pack(side="bottom", fill="x", pady=(BUTTON_GAP_Y, 0))
         else:
             button.pack(fill="x", pady=(0, BUTTON_GAP_Y))
+        return button
 
     def _build_greyscale_controls(self, parent: tk.Widget) -> None:
         """Build the dropdown for selecting a greyscale conversion method.
@@ -255,6 +281,7 @@ class RecolorizerApp(tk.Tk):
             width=BUTTON_WIDTH,
         )
         method_dropdown.pack(fill="x")
+        self.greyscale_method_var.trace_add("write", self._on_greyscale_method_change)
 
     def _get_selected_greyscale_method_code(self) -> str:
         """Get the method code corresponding to the selected greyscale dropdown option.
@@ -301,7 +328,7 @@ class RecolorizerApp(tk.Tk):
         mode_dropdown = ttk.Combobox(
             controls_frame,
             textvariable=self.colorpoint_mode_var,
-            values=("Random", "Uniform"),
+            values=("Random", "Uniform", "Manual"),
             state="readonly",
             width=BUTTON_WIDTH,
         )
@@ -356,10 +383,83 @@ class RecolorizerApp(tk.Tk):
         )
         uniform_pointcount_label.pack(fill="x", pady=(6, 0))
 
+        self.manual_input_frame = tk.Frame(controls_frame, bg=BUTTON_COLUMN_BG)
+        manual_label = tk.Label(
+            self.manual_input_frame,
+            text="Click and drag on the source image to select colorpoints.",
+            bg=BUTTON_COLUMN_BG,
+            fg=STATUS_FG,
+            anchor="w",
+            justify="left",
+            wraplength=220,
+        )
+        manual_label.pack(fill="x", pady=(0, 6))
+        self.manual_brush_size_var = tk.DoubleVar(value=DEFAULT_MANUAL_BRUSH_SIZE)
+        brush_size_label = tk.Label(
+            self.manual_input_frame,
+            text="Brush size",
+            bg=BUTTON_COLUMN_BG,
+            fg=STATUS_FG,
+            anchor="w",
+            justify="left",
+        )
+        brush_size_label.pack(fill="x", pady=(0, 2))
+        brush_size_scale = tk.Scale(
+            self.manual_input_frame,
+            variable=self.manual_brush_size_var,
+            from_=MIN_MANUAL_BRUSH_SIZE,
+            to=MAX_MANUAL_BRUSH_SIZE,
+            resolution=0.1,
+            orient="horizontal",
+            bg=BUTTON_COLUMN_BG,
+            fg=STATUS_FG,
+            highlightthickness=0,
+            relief="flat",
+        )
+        brush_size_scale.pack(fill="x", pady=(0, 6))
+        self.manual_brush_size_text_var = tk.StringVar(value="")
+        brush_size_value_label = tk.Label(
+            self.manual_input_frame,
+            textvariable=self.manual_brush_size_text_var,
+            bg=BUTTON_COLUMN_BG,
+            fg=STATUS_FG,
+            anchor="w",
+            justify="left",
+        )
+        brush_size_value_label.pack(fill="x", pady=(0, 6))
+        manual_reset_button = tk.Button(
+            self.manual_input_frame,
+            text="Reset Manual Points",
+            command=self._reset_manual_points,
+            width=BUTTON_WIDTH,
+            bg=BUTTON_BG,
+            fg=BUTTON_FG,
+            activebackground=BUTTON_ACTIVE_BG,
+            activeforeground=BUTTON_FG,
+            relief="flat",
+            padx=8,
+            pady=6,
+        )
+        manual_reset_button.pack(fill="x")
+        self.manual_pointcount_var = tk.StringVar(value="Manual colorpoints selected: 0")
+        manual_pointcount_label = tk.Label(
+            self.manual_input_frame,
+            textvariable=self.manual_pointcount_var,
+            bg=BUTTON_COLUMN_BG,
+            fg=STATUS_FG,
+            anchor="w",
+            justify="left",
+            wraplength=220,
+        )
+        manual_pointcount_label.pack(fill="x", pady=(6, 0))
+
         self.colorpoint_mode_var.trace_add("write", self._on_colorpoint_mode_change)
         self.uniform_w_interval_var.trace_add("write", self._on_uniform_interval_change)
         self.uniform_h_interval_var.trace_add("write", self._on_uniform_interval_change)
+        self.manual_brush_size_var.trace_add("write", self._on_manual_brush_size_change)
         self._update_uniform_pointcount_text()
+        self._update_manual_brush_size_text()
+        self._update_manual_pointcount_text()
         self._update_colorpoint_input_fields()
 
     def _on_colorpoint_mode_change(self, *_args) -> None:
@@ -372,6 +472,47 @@ class RecolorizerApp(tk.Tk):
             None.
         """
         self._update_colorpoint_input_fields()
+        self._update_manual_pointcount_text()
+        self._set_mixed_button_visibility()
+        if self.colorpoint_mode_var.get() == "Manual":
+            if self.image_source is None:
+                self.status_var.set("Load a source image, then click and drag to select manual points.")
+                return
+            if self._ensure_manual_selection_ready():
+                self.status_var.set("Manual mode active. Click and drag on source image to select points.")
+
+    def _set_mixed_button_visibility(self) -> None:
+        """Show or hide the mixed-image button based on the selected point mode.
+
+        Returns:
+            None.
+        """
+        is_manual_mode = self.colorpoint_mode_var.get() == "Manual"
+        is_packed = self.mixed_button.winfo_manager() == "pack"
+
+        if is_manual_mode and is_packed:
+            self.mixed_button.pack_forget()
+            return
+
+        if not is_manual_mode and not is_packed:
+            self.mixed_button.pack(fill="x", pady=(0, BUTTON_GAP_Y), before=self.recolorised_button)
+
+    def _on_greyscale_method_change(self, *_args) -> None:
+        """Handle updates when the greyscale method dropdown value changes.
+
+        Args:
+            *_args: Tkinter trace arguments.
+
+        Returns:
+            None.
+        """
+        if self.colorpoint_mode_var.get() != "Manual":
+            return
+
+        if self.image_source is None or self.manual_colorpoints_coords is None:
+            return
+
+        self._rebuild_manual_mixed_from_mask()
 
     def _on_uniform_interval_change(self, *_args) -> None:
         """Handle updates when the uniform interval inputs are edited.
@@ -384,6 +525,17 @@ class RecolorizerApp(tk.Tk):
         """
         self._update_uniform_pointcount_text()
 
+    def _on_manual_brush_size_change(self, *_args) -> None:
+        """Handle updates when the manual brush-size control value changes.
+
+        Args:
+            *_args: Tkinter trace arguments.
+
+        Returns:
+            None.
+        """
+        self._update_manual_brush_size_text()
+
     def _update_colorpoint_input_fields(self) -> None:
         """Show only the input fields relevant to the selected colorpoint mode.
 
@@ -393,9 +545,12 @@ class RecolorizerApp(tk.Tk):
         mode = self.colorpoint_mode_var.get()
         self.random_input_frame.pack_forget()
         self.uniform_input_frame.pack_forget()
+        self.manual_input_frame.pack_forget()
 
         if mode == "Uniform":
             self.uniform_input_frame.pack(fill="x")
+        elif mode == "Manual":
+            self.manual_input_frame.pack(fill="x")
         else:
             self.random_input_frame.pack(fill="x")
 
@@ -446,6 +601,337 @@ class RecolorizerApp(tk.Tk):
         number_of_points = self._count_uniform_colorpoints(width, height, w_interval, h_interval)
         self.uniform_pointcount_var.set(f"Number of colorpoints: {number_of_points}")
 
+    def _is_manual_mode(self) -> bool:
+        """Check whether the manual point-selection mode is currently selected.
+
+        Returns:
+            True if manual mode is selected, otherwise False.
+        """
+        return self.colorpoint_mode_var.get() == "Manual"
+
+    def _get_manual_brush_size(self) -> float:
+        """Get a validated manual brush-size value.
+
+        Returns:
+            Brush size in the range [MIN_MANUAL_BRUSH_SIZE, MAX_MANUAL_BRUSH_SIZE].
+        """
+        brush_size = float(self.manual_brush_size_var.get())
+        return min(MAX_MANUAL_BRUSH_SIZE, max(MIN_MANUAL_BRUSH_SIZE, brush_size))
+
+    def _update_manual_brush_size_text(self) -> None:
+        """Update the manual brush-size helper text.
+
+        Returns:
+            None.
+        """
+        if not hasattr(self, "manual_brush_size_text_var"):
+            return
+
+        brush_size = self._get_manual_brush_size()
+        if brush_size < 1:
+            stride = max(1, int(round(1.0 / brush_size)))
+            self.manual_brush_size_text_var.set(
+                f"Brush size: {brush_size:.1f}"
+            )
+        else:
+            radius = int(round(brush_size))
+            self.manual_brush_size_text_var.set(
+                f"Brush size: {brush_size:.1f}"
+            )
+
+    def _get_manual_selected_point_count(self) -> int:
+        """Get the current number of manually selected colorpoints.
+
+        Returns:
+            Number of selected manual points.
+        """
+        if self.manual_colorpoints_coords is None:
+            return 0
+
+        return int(np.count_nonzero(self.manual_colorpoints_coords[:, :, 0]))
+
+    def _update_manual_pointcount_text(self) -> None:
+        """Update the displayed number of manually selected colorpoints.
+
+        Returns:
+            None.
+        """
+        if not hasattr(self, "manual_pointcount_var"):
+            return
+
+        if self.image_source is None:
+            self.manual_pointcount_var.set("Manual colorpoints: load a source image.")
+            return
+
+        number_of_points = self._get_manual_selected_point_count()
+        self.manual_pointcount_var.set(f"Manual colorpoints selected: {number_of_points}")
+
+    def _reset_manual_state(self) -> None:
+        """Reset all cached data related to manual point selection.
+
+        Returns:
+            None.
+        """
+        self.manual_colorpoints_coords = None
+        self.manual_color_array = None
+        self.manual_greyscale_array = None
+        self.manual_mixed_array = None
+        self.manual_method_used = None
+        self.manual_drag_active = False
+        self.manual_last_point = None
+        self.manual_sparse_counter = 0
+        self._update_manual_pointcount_text()
+
+    def _reset_manual_points(self) -> None:
+        """Clear currently selected manual points and refresh the mixed-image preview.
+
+        Returns:
+            None.
+        """
+        if self.image_source is None:
+            self.status_var.set("Load a source image before resetting manual points.")
+            return
+
+        if not self._is_manual_mode():
+            return
+
+        self._ensure_manual_selection_ready(reset=True)
+        self.colorpoints_coords = None
+        self.colorpoint_mode_used = None
+        self._update_manual_pointcount_text()
+        self.status_var.set("Manual points reset.")
+
+    def _ensure_manual_selection_ready(self, reset: bool = False) -> bool:
+        """Ensure manual-selection arrays are initialised for the current source image.
+
+        Args:
+            reset: Whether to force-reset all manual selections.
+
+        Returns:
+            True if manual selection data is ready, otherwise False.
+        """
+        if self.image_source is None:
+            return False
+
+        width, height = self.image_source.size
+        method_code = self._get_selected_greyscale_method_code()
+
+        arrays_missing = (
+            self.manual_colorpoints_coords is None
+            or self.manual_color_array is None
+            or self.manual_greyscale_array is None
+            or self.manual_mixed_array is None
+        )
+
+        shape_changed = (
+            self.manual_colorpoints_coords is not None
+            and self.manual_colorpoints_coords.shape != (height, width, 3)
+        )
+
+        method_changed = self.manual_method_used != method_code
+
+        if reset or arrays_missing or shape_changed:
+            self.manual_colorpoints_coords = np.zeros((height, width, 3), dtype=bool)
+            self.manual_color_array = np.asarray(self.image_source).copy()
+            greyscale_image = RGB_to_greyscale(self.image_source, method_code)
+            self.manual_greyscale_array = np.asarray(greyscale_image).copy()
+            self.manual_mixed_array = self.manual_greyscale_array.copy()
+            self.manual_method_used = method_code
+            self.manual_sparse_counter = 0
+            self.colorpoints_coords = None
+            self.colorpoint_mode_used = None
+            self.image_mixed = Image.fromarray(self.manual_mixed_array.copy())
+            self._set_subimage("mixed", self.image_mixed)
+            self._update_manual_pointcount_text()
+            return True
+
+        if method_changed:
+            self._rebuild_manual_mixed_from_mask()
+
+        return True
+
+    def _rebuild_manual_mixed_from_mask(self) -> None:
+        """Rebuild the manual mixed-image preview from the current point mask and method.
+
+        Returns:
+            None.
+        """
+        if self.image_source is None or self.manual_colorpoints_coords is None:
+            return
+
+        method_code = self._get_selected_greyscale_method_code()
+        self.manual_color_array = np.asarray(self.image_source).copy()
+        greyscale_image = RGB_to_greyscale(self.image_source, method_code)
+        self.manual_greyscale_array = np.asarray(greyscale_image).copy()
+        self.manual_mixed_array = np.where(
+            self.manual_colorpoints_coords,
+            self.manual_color_array,
+            self.manual_greyscale_array,
+        )
+        self.manual_method_used = method_code
+        self.image_mixed = Image.fromarray(self.manual_mixed_array.copy())
+        self._set_subimage("mixed", self.image_mixed)
+        self._update_manual_pointcount_text()
+
+    def _panel_to_source_point(self, panel_x: int, panel_y: int):
+        """Map a source-panel mouse position to a source-image pixel coordinate.
+
+        Args:
+            panel_x: X-coordinate in source-panel pixels.
+            panel_y: Y-coordinate in source-panel pixels.
+
+        Returns:
+            A tuple (x, y) in source-image pixels, or None if out of bounds.
+        """
+        if self.image_source is None:
+            return None
+
+        panel_width = max(self.source_canvas.winfo_width(), 1)
+        panel_height = max(self.source_canvas.winfo_height(), 1)
+        if panel_x < 0 or panel_y < 0 or panel_x >= panel_width or panel_y >= panel_height:
+            return None
+
+        image_width, image_height = self.image_source.size
+        source_x = min(image_width - 1, int((panel_x / panel_width) * image_width))
+        source_y = min(image_height - 1, int((panel_y / panel_height) * image_height))
+        return source_x, source_y
+
+    def _apply_manual_brush(self, source_x: int, source_y: int) -> None:
+        """Apply the manual-selection brush around a source-image point.
+
+        Args:
+            source_x: X-coordinate in source-image pixels.
+            source_y: Y-coordinate in source-image pixels.
+
+        Returns:
+            None.
+        """
+        if self.manual_colorpoints_coords is None or self.manual_mixed_array is None:
+            return
+
+        brush_size = self._get_manual_brush_size()
+        image_height, image_width = self.manual_colorpoints_coords.shape[:2]
+        if brush_size < 1:
+            stride = max(1, int(round(1.0 / brush_size)))
+            if self.manual_sparse_counter % stride != 0:
+                self.manual_sparse_counter += 1
+                return
+
+            self.manual_sparse_counter += 1
+            self.manual_colorpoints_coords[source_y:source_y + 1, source_x:source_x + 1, :] = True
+            self.manual_mixed_array[source_y:source_y + 1, source_x:source_x + 1, :] = (
+                self.manual_color_array[source_y:source_y + 1, source_x:source_x + 1, :]
+            )
+            return
+
+        brush_radius = int(round(brush_size))
+        x_start = max(0, source_x - brush_radius)
+        x_end = min(image_width, source_x + brush_radius + 1)
+        y_start = max(0, source_y - brush_radius)
+        y_end = min(image_height, source_y + brush_radius + 1)
+
+        self.manual_colorpoints_coords[y_start:y_end, x_start:x_end, :] = True
+        self.manual_mixed_array[y_start:y_end, x_start:x_end, :] = self.manual_color_array[
+            y_start:y_end,
+            x_start:x_end,
+            :,
+        ]
+
+    def _apply_manual_line(self, start_point, end_point) -> None:
+        """Apply manual selection along a line between two source-image points.
+
+        Args:
+            start_point: Start point tuple (x, y).
+            end_point: End point tuple (x, y).
+
+        Returns:
+            None.
+        """
+        x0, y0 = start_point
+        x1, y1 = end_point
+        steps = max(abs(x1 - x0), abs(y1 - y0)) + 1
+
+        if steps <= 1:
+            self._apply_manual_brush(x1, y1)
+            return
+
+        for step in range(steps):
+            t = step / (steps - 1)
+            x = int(round(x0 + (x1 - x0) * t))
+            y = int(round(y0 + (y1 - y0) * t))
+            self._apply_manual_brush(x, y)
+
+    def _on_source_mouse_down(self, event) -> None:
+        """Handle the start of a manual point-selection drag on the source panel.
+
+        Args:
+            event: Tkinter mouse event.
+
+        Returns:
+            None.
+        """
+        if not self._is_manual_mode():
+            return
+
+        if not self._ensure_manual_selection_ready():
+            return
+
+        point = self._panel_to_source_point(event.x, event.y)
+        if point is None:
+            return
+
+        self.manual_drag_active = True
+        self.manual_sparse_counter = 0
+        self.manual_last_point = point
+        self._apply_manual_brush(point[0], point[1])
+        self.colorpoints_coords = self.manual_colorpoints_coords.copy()
+        self.colorpoint_mode_used = "Manual"
+        self.image_mixed = Image.fromarray(self.manual_mixed_array.copy())
+        self._set_subimage("mixed", self.image_mixed)
+        self._update_manual_pointcount_text()
+
+    def _on_source_mouse_drag(self, event) -> None:
+        """Handle mouse dragging for manual point selection on the source panel.
+
+        Args:
+            event: Tkinter mouse event.
+
+        Returns:
+            None.
+        """
+        if not self._is_manual_mode():
+            return
+
+        if not self.manual_drag_active:
+            return
+
+        point = self._panel_to_source_point(event.x, event.y)
+        if point is None:
+            return
+
+        if self.manual_last_point is None:
+            self.manual_last_point = point
+
+        self._apply_manual_line(self.manual_last_point, point)
+        self.manual_last_point = point
+        self.colorpoints_coords = self.manual_colorpoints_coords.copy()
+        self.colorpoint_mode_used = "Manual"
+        self.image_mixed = Image.fromarray(self.manual_mixed_array.copy())
+        self._set_subimage("mixed", self.image_mixed)
+        self._update_manual_pointcount_text()
+
+    def _on_source_mouse_up(self, _event) -> None:
+        """Handle the end of a manual point-selection drag on the source panel.
+
+        Args:
+            _event: Tkinter mouse event.
+
+        Returns:
+            None.
+        """
+        self.manual_drag_active = False
+        self.manual_last_point = None
+
     def _read_int(self, value: str, field_name: str, minimum: int):
         """Parse and validate an integer value from a text field.
 
@@ -493,6 +979,21 @@ class RecolorizerApp(tk.Tk):
             description = f"uniform points, with a width interval of {w_interval} pixels and a \
             height interval of {h_interval} pixels."
             return colorpoints_coords, description
+
+        if mode == "Manual":
+            if not self._ensure_manual_selection_ready():
+                return None, ""
+
+            number_of_points = self._get_manual_selected_point_count()
+            if number_of_points == 0:
+                messagebox.showwarning(
+                    "No Points Selected",
+                    "Select at least one manual point by clicking and dragging on the source image.",
+                )
+                return None, ""
+
+            description = f"manual points ({number_of_points} points)"
+            return self.manual_colorpoints_coords.copy(), description
 
         number_of_points = self._read_int(self.random_points_var.get(), "number of colorpoints", 1)
         if number_of_points is None:
@@ -696,7 +1197,9 @@ class RecolorizerApp(tk.Tk):
         self.image_mixed = None
         self.image_recolorised = None
         self.colorpoints_coords = None
+        self.colorpoint_mode_used = None
         self.greyscale_method_used = None
+        self._reset_manual_state()
         self.panel_aspect_ratio = CELL_WIDTH / CELL_HEIGHT
         self._update_panel_sizes()
         self._set_all_placeholders()
@@ -733,7 +1236,9 @@ class RecolorizerApp(tk.Tk):
         self.image_mixed = None
         self.image_recolorised = None
         self.colorpoints_coords = None
+        self.colorpoint_mode_used = None
         self.greyscale_method_used = None
+        self._reset_manual_state()
 
         self._set_subimage("source", self.image_source)
         self._set_subimage("greyscale", None)
@@ -772,6 +1277,7 @@ class RecolorizerApp(tk.Tk):
             return
 
         self.colorpoints_coords = colorpoints_coords
+        self.colorpoint_mode_used = self.colorpoint_mode_var.get()
 
         greyscale_method = self._get_selected_greyscale_method_code()
         self.image_mixed = generate_mixed_img(
@@ -797,13 +1303,15 @@ class RecolorizerApp(tk.Tk):
             self.greyscale_method_used = greyscale_method
             self._set_subimage("greyscale", self.image_greyscale)
 
-        if self.colorpoints_coords is None:
+        current_mode = self.colorpoint_mode_var.get()
+        if self.colorpoints_coords is None or self.colorpoint_mode_used != current_mode:
             width, height = self.image_source.size
             colorpoints_coords, _description = self._generate_colorpoints_coords(width, height)
             if colorpoints_coords is None:
                 return
 
             self.colorpoints_coords = colorpoints_coords
+            self.colorpoint_mode_used = current_mode
 
         D = get_D(self.image_source, self.colorpoints_coords)
         self.image_recolorised = recolorise(D, self.image_greyscale)

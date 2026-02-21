@@ -5,6 +5,10 @@ from scipy.spatial.distance import cdist
 from generalfunctions import *
 from greyscaleconversion import *
 
+from scipy.linalg import cho_solve, cho_factor
+
+import time
+
 def phi_gaussian(r: np.ndarray) -> np.ndarray:
     """Determine the values of the Gaussian RBF phi(r) = exp(-r^2) for a given array r.
     
@@ -52,7 +56,8 @@ def kernel(
     Returns:
         K: numpy array shape (m, n).
     """
-    input1 = cdist(x, y, metric="euclidean") / sig1
+    N, M = np.shape(greyscale_map)
+    input1 = cdist(x, y, metric="euclidean") / (sig1 * np.sqrt(N**2 + M**2)) 
     # cdist computes pairwise Euclidean distances, resulting in an (m, n) matrix.
 
     x_row = x[:, 0]
@@ -62,7 +67,7 @@ def kernel(
 
     greyscale_x = greyscale_map[x_row, x_col]
     greyscale_y = greyscale_map[y_row, y_col]
-    input2 = (np.abs(greyscale_x[:, None] - greyscale_y[None, :]) ** p) / sig2
+    input2 = (np.abs(greyscale_x[:, None] - greyscale_y[None, :]) ** p) / (sig2 * 255**p)
     K = phi(input1) * phi(input2)
     
     return K 
@@ -105,7 +110,11 @@ def get_Fs(Komega: np.ndarray, a_s: np.ndarray) -> np.ndarray:
     Fs =  Komega @ a_s
     return Fs
 
-def recolorise(D: np.ndarray, greyscale_image: Image.Image) -> Image.Image:
+def recolorise(D: np.ndarray, 
+               greyscale_image: Image.Image,
+               sig1: float=300,
+               sig2: float=300,
+               p: float=0.5,) -> Image.Image:
     """Take the set D and the greyscale image, and use these to recolorise the image. 
     
     Args:
@@ -118,8 +127,10 @@ def recolorise(D: np.ndarray, greyscale_image: Image.Image) -> Image.Image:
     greyscale_array = np.asarray(greyscale_image)[:, :, 0]
     
     phi = phi_gaussian
-    kernel_params = {"sig1": 300, "sig2": 300, "p": 0.5}
+    kernel_params = {"sig1": sig1, "sig2": sig2, "p": p}
     a_s = compute_as(D, greyscale_array, phi, **kernel_params)
+    
+    start = time.time()
     
     height, width = greyscale_array.shape
     rows, cols = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
@@ -127,11 +138,15 @@ def recolorise(D: np.ndarray, greyscale_image: Image.Image) -> Image.Image:
     Komega = kernel(phi, pairs, D[:, :2], greyscale_array, **kernel_params) # compute K_omega, i.e. the kernal matrix for our whole array
     
     Fs = get_Fs(Komega, a_s).reshape(height, width, 3)
+    
+    end = time.time()
+    total_time = end - start
+    
     Fs = np.clip(Fs, 0, 255)
     
     F_img = Image.fromarray(np.uint8(Fs))
     
-    return F_img
+    return F_img, total_time
     
 
 if __name__=="__main__":
@@ -150,6 +165,6 @@ if __name__=="__main__":
     greyscale_image = RGB_to_greyscale(image)
     D = get_D(image, points)
 
-    recolorised_img = recolorise(D, greyscale_image)
+    recolorised_img, computational_cost = recolorise(D, greyscale_image)
     recolorised_img.show()
-
+    print(f"Recolorising the image took {computational_cost:.1f} seconds")

@@ -1,5 +1,6 @@
 import numpy as np
 from PIL import Image
+from skimage.metrics import structural_similarity 
 
 def get_bands(img: Image.Image) -> tuple[np.ndarray, np.ndarray, np.ndarray]:     
     """Split an RGB image into its Red, Green, and Blue bands.
@@ -114,4 +115,11 @@ def get_D(img: Image.Image, colorpoints_coords: np.ndarray) -> np.ndarray:
     D = np.hstack((row, col, r, g, b))
     
     return np.int64(D)
-  
+
+def determine_SSRI(original_img: Image.Image, recolorized_img: Image.Image) -> float:
+    original_array = np.asarray(original_img)
+    recolorized_array = np.asarray(recolorized_img)
+    
+    SSIM = structural_similarity(original_array, recolorized_array, channel_axis=2)
+    
+    return SSIM
